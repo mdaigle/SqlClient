@@ -1071,12 +1071,15 @@ namespace Microsoft.Data.SqlClient
 
             if (_fResetConnection)
             {
-                // Ensure we are either going against 2000, or we are not enlisted in a
-                // distributed transaction - otherwise don't reset!
-                if (Is2000)
+                if (Is2008OrNewer)
                 {
-                    // Prepare the parser for the connection reset - the next time a trip
-                    // to the server is made.
+                    // RESETCONNECTIONSKIPTRAN support was added in 7.3
+                    //_parser.PrepareResetConnection(PoolGroupProviderInfo.PoolGroup);
+                    _parser.PrepareResetConnection(IsTransactionRoot && !IsNonPoolableTransactionRoot);
+                }
+                else if (Is2000)
+                {
+                    // RESETCONNECTION support was added in TDS 7.1
                     _parser.PrepareResetConnection(IsTransactionRoot && !IsNonPoolableTransactionRoot);
                 }
                 else if (!IsEnlistedInTransaction)

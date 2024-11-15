@@ -5,6 +5,7 @@
 using System;
 using System.Data.Common;
 using System.Diagnostics;
+using System.Net;
 using System.Transactions;
 using Microsoft.Data.Common;
 using Microsoft.Data.ProviderBase;
@@ -465,112 +466,111 @@ namespace Microsoft.Data.SqlClient
             }
         }
 
+        /*
+         * Create a new delegated transaction and attempt to enlist it with
+         * the provided transaction as a single phase notification. If there 
+         * is already a single phase notification associated with the transaction, 
+         * then the enlistment fails. Instead, the provided transaction is 
+         * promoted to a distributed transaction and the connection is enlisted 
+         * to the distributed transaction.
+         * 
+         * https://learn.microsoft.com/en-us/dotnet/framework/data/transactions/optimization-spc-and-promotable-spn
+         * 
+         * NOTE: Promotable transactions are only supported on 2005 servers or newer.
+         * 
+         * NOTE: System.Transactions claims to resolve all
+         * potential race conditions between multiple delegate
+         * requests of the same transaction to different
+         * connections in their code, such that only one
+         * attempt to delegate will succeed.
+         * 
+         * NOTE: PromotableSinglePhaseEnlist will eventually
+         * make a round trip to the server; doing this inside
+         * a lock is not the best choice.  We presume that you
+         * aren't trying to enlist concurrently on two threads
+         * and leave it at that -- We don't claim any thread
+         * safety with regard to multiple concurrent requests
+         * to enlist the same connection in different
+         * transactions, which is good, because we don't have
+         * it anyway.
+         * 
+         * PromotableSinglePhaseEnlist may not actually promote
+         * the transaction when it is already delegated (this is
+         * the way they resolve the race condition when two
+         * threads attempt to delegate the same Lightweight
+         * Transaction)  In that case, we can safely ignore
+         * our delegated transaction, and proceed to enlist
+         * in the promoted one.
+         * 
+         * NOTE: Global Transactions is an Azure SQL DB only
+         * feature where the Transaction Manager (TM) is not
+         * MS-DTC. Sys.Tx added APIs to support Non MS-DTC
+         * promoter types/TM in .NET 4.6.2. Following directions
+         * from .NETFX shiproom, to avoid a "hard-dependency"
+         * (compile time) on Sys.Tx, we use reflection to invoke
+         * the new APIs. Further, the _isGlobalTransaction flag
+         * indicates that this is an Azure SQL DB Transaction
+         * that could be promoted to a Global Transaction (it's
+         * always false for on-prem Sql Server). The Promote()
+         * call in SqlDelegatedTransaction makes sure that the
+         * right Sys.Tx.dll is loaded and that Global Transactions
+         * are actually allowed for this Azure SQL DB.
+         */
         private void EnlistNonNull(Transaction tx)
         {
-            Debug.Assert(tx != null, "null transaction?");
-            SqlClientEventSource.Log.TryAdvancedTraceEvent("SqlInternalConnection.EnlistNonNull | ADV | Object {0}, Transaction Id {1}, attempting to delegate.", ObjectID, tx?.TransactionInformation?.LocalIdentifier);
-            bool hasDelegatedTransaction = false;
-
-            // Promotable transactions are only supported on 2005
-            // servers or newer.
-            SqlDelegatedTransaction delegatedTransaction = new(this, tx);
-
-            try
+            bool EnlistPromotableSinglePhase(Transaction tx, SqlDelegatedTransaction delegatedTransaction)
             {
-                // NOTE: System.Transactions claims to resolve all
-                // potential race conditions between multiple delegate
-                // requests of the same transaction to different
-                // connections in their code, such that only one
-                // attempt to delegate will succeed.
-
-                // NOTE: PromotableSinglePhaseEnlist will eventually
-                // make a round trip to the server; doing this inside
-                // a lock is not the best choice.  We presume that you
-                // aren't trying to enlist concurrently on two threads
-                // and leave it at that -- We don't claim any thread
-                // safety with regard to multiple concurrent requests
-                // to enlist the same connection in different
-                // transactions, which is good, because we don't have
-                // it anyway.
-
-                // PromotableSinglePhaseEnlist may not actually promote
-                // the transaction when it is already delegated (this is
-                // the way they resolve the race condition when two
-                // threads attempt to delegate the same Lightweight
-                // Transaction)  In that case, we can safely ignore
-                // our delegated transaction, and proceed to enlist
-                // in the promoted one.
-
-                // NOTE: Global Transactions is an Azure SQL DB only
-                // feature where the Transaction Manager (TM) is not
-                // MS-DTC. Sys.Tx added APIs to support Non MS-DTC
-                // promoter types/TM in .NET 4.6.2. Following directions
-                // from .NETFX shiproom, to avoid a "hard-dependency"
-                // (compile time) on Sys.Tx, we use reflection to invoke
-                // the new APIs. Further, the _isGlobalTransaction flag
-                // indicates that this is an Azure SQL DB Transaction
-                // that could be promoted to a Global Transaction (it's
-                // always false for on-prem Sql Server). The Promote()
-                // call in SqlDelegatedTransaction makes sure that the
-                // right Sys.Tx.dll is loaded and that Global Transactions
-                // are actually allowed for this Azure SQL DB.
-
-                if (_isGlobalTransaction)
+                try
                 {
-                    if (SysTxForGlobalTransactions.EnlistPromotableSinglePhase == null)
+                    if (_isGlobalTransaction)
                     {
-                        // This could be a local Azure SQL DB transaction.
-                        hasDelegatedTransaction = tx.EnlistPromotableSinglePhase(delegatedTransaction);
+                        if (SysTxForGlobalTransactions.EnlistPromotableSinglePhase == null)
+                        {
+                            // This could be a local Azure SQL DB transaction.
+                            return tx.EnlistPromotableSinglePhase(delegatedTransaction);
+                        }
+                        else
+                        {
+                            return (bool)SysTxForGlobalTransactions.EnlistPromotableSinglePhase.Invoke(tx, new object[] { delegatedTransaction, s_globalTransactionTMID });
+                        }
                     }
                     else
                     {
-                        hasDelegatedTransaction = (bool)SysTxForGlobalTransactions.EnlistPromotableSinglePhase.Invoke(tx, new object[] { delegatedTransaction, s_globalTransactionTMID });
+                        // This is an MS-DTC distributed transaction
+                        return tx.EnlistPromotableSinglePhase(delegatedTransaction);
                     }
                 }
-                else
+                catch (SqlException e)
                 {
-                    // This is an MS-DTC distributed transaction
-                    hasDelegatedTransaction = tx.EnlistPromotableSinglePhase(delegatedTransaction);
-                }
-
-                if (hasDelegatedTransaction)
-                {
-                    DelegatedTransaction = delegatedTransaction;
-                    SqlClientEventSource.Log.TryAdvancedTraceEvent("SqlInternalConnection.EnlistNonNull | ADV | Object Id {0}, Client Connection Id {1} delegated to transaction {1} with transactionId {2}", ObjectID, Connection?.ClientConnectionId, delegatedTransaction?.ObjectID, delegatedTransaction?.Transaction?.TransactionInformation?.LocalIdentifier);
-                }
-            }
-            catch (SqlException e)
-            {
-                // we do not want to eat the error if it is a fatal one
-                if (e.Class >= TdsEnums.FATAL_ERROR_CLASS)
-                {
-                    throw;
-                }
-
-                // if the parser is null or its state is not openloggedin, the connection is no longer good.
-                if (this is SqlInternalConnectionTds tdsConnection)
-                {
-                    TdsParser parser = tdsConnection.Parser;
-                    if (parser == null || parser.State != TdsParserState.OpenLoggedIn)
+                    // we do not want to eat the error if it is a fatal one
+                    if (e.Class >= TdsEnums.FATAL_ERROR_CLASS)
                     {
                         throw;
                     }
-                }
 
-#if NETFRAMEWORK
-                ADP.TraceExceptionWithoutRethrow(e);
-#endif
-                // In this case, SqlDelegatedTransaction.Initialize
-                // failed and we don't necessarily want to reject
-                // things -- there may have been a legitimate reason
-                // for the failure.
+                    // if the parser is null or its state is not openloggedin, the connection is no longer good.
+                    if (this is SqlInternalConnectionTds tdsConnection)
+                    {
+                        TdsParser parser = tdsConnection.Parser;
+                        if (parser == null || parser.State != TdsParserState.OpenLoggedIn)
+                        {
+                            throw;
+                        }
+                    }
+
+    #if NETFRAMEWORK
+                    ADP.TraceExceptionWithoutRethrow(e);
+    #endif
+                    // In this case, SqlDelegatedTransaction.Initialize
+                    // failed and we don't necessarily want to reject
+                    // things -- there may have been a legitimate reason
+                    // for the failure.
+                    return false;
+                }
             }
 
-            if (!hasDelegatedTransaction)
+            byte[] ConstructTransactionCookie(Transaction tx)
             {
-                SqlClientEventSource.Log.TryAdvancedTraceEvent("SqlInternalConnection.EnlistNonNull | ADV | Object Id {0}, delegation not possible, enlisting.", ObjectID);
-                byte[] cookie = null;
-
                 if (_isGlobalTransaction)
                 {
                     if (SysTxForGlobalTransactions.GetPromotedToken == null)
@@ -578,7 +578,7 @@ namespace Microsoft.Data.SqlClient
                         throw SQL.UnsupportedSysTxForGlobalTransactions();
                     }
 
-                    cookie = (byte[])SysTxForGlobalTransactions.GetPromotedToken.Invoke(tx, null);
+                    return (byte[])SysTxForGlobalTransactions.GetPromotedToken.Invoke(tx, null);
                 }
                 else
                 {
@@ -587,17 +587,56 @@ namespace Microsoft.Data.SqlClient
                         byte[] dtcAddress = GetDTCAddress();
                         _whereAbouts = dtcAddress ?? throw SQL.CannotGetDTCAddress();
                     }
-                    cookie = GetTransactionCookie(tx, _whereAbouts);
+                    return GetTransactionCookie(tx, _whereAbouts);
                 }
+            }
 
-                // send cookie to server to finish enlistment
+            Debug.Assert(tx != null, "null transaction?");
+            SqlClientEventSource.Log.TryAdvancedTraceEvent(
+                "SqlInternalConnection.EnlistNonNull | ADV | Object {0}, Transaction Id {1}, " +
+                "attempting to delegate.",
+                ObjectID,
+                tx?.TransactionInformation?.LocalIdentifier);
+
+
+            SqlDelegatedTransaction delegatedTransaction = new(this, tx);
+            bool successfullyDelegated = EnlistPromotableSinglePhase(tx, delegatedTransaction);
+
+            if (successfullyDelegated)
+            {
+                DelegatedTransaction = delegatedTransaction;
+                SqlClientEventSource.Log.TryAdvancedTraceEvent(
+                    "SqlInternalConnection.EnlistNonNull | ADV | Object Id {0}, " +
+                    "Client Connection Id {1} delegated to transaction {2} with transactionId {3}", 
+                    ObjectID,
+                    Connection?.ClientConnectionId,
+                    delegatedTransaction?.ObjectID,
+                    delegatedTransaction?.Transaction?.TransactionInformation?.LocalIdentifier);
+            }
+            else
+            {
+                SqlClientEventSource.Log.TryAdvancedTraceEvent(
+                    "SqlInternalConnection.EnlistNonNull | ADV | Object Id {0}, delegation not " +
+                    "possible, enlisting.",
+                    ObjectID);
+
+                // constructing a cookie ensures that the transaction is promoted if needed
+                byte[] cookie = ConstructTransactionCookie(tx);
+
+                // send cookie to server to finish enlistment with distributed transaction
                 PropagateTransactionCookie(cookie);
 
                 _isEnlistedInTransaction = true;
-                SqlClientEventSource.Log.TryAdvancedTraceEvent("SqlInternalConnection.EnlistNonNull | ADV | Object Id {0}, Client Connection Id {1}, Enlisted in transaction with transactionId {2}", ObjectID, Connection?.ClientConnectionId, tx?.TransactionInformation?.LocalIdentifier);
+                SqlClientEventSource.Log.TryAdvancedTraceEvent(
+                    "SqlInternalConnection.EnlistNonNull | ADV | Object Id {0}, Client Connection Id {1}, " +
+                    "Enlisted in transaction with transactionId {2}",
+                    ObjectID,
+                    Connection?.ClientConnectionId,
+                    tx?.TransactionInformation?.LocalIdentifier);
             }
 
-            EnlistedTransaction = tx; // Tell the base class about our enlistment
+            // Tell the base class about our enlistment
+            EnlistedTransaction = tx;
 
 
             // If we're on a 2005 or newer server, and we delegate the
