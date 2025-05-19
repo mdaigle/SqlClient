@@ -8,14 +8,16 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using Microsoft.VisualBasic;
 
 namespace Microsoft.Data.SqlClient.ManualTesting.Tests.SystemDataInternals
 {
     internal static class ConnectionPoolHelper
     {
         private static Assembly s_MicrosoftDotData = Assembly.Load(new AssemblyName(typeof(SqlConnection).GetTypeInfo().Assembly.FullName));
+
+        #region Common
         private static Type s_dbConnectionPool = s_MicrosoftDotData.GetType("Microsoft.Data.SqlClient.ConnectionPool.IDbConnectionPool");
-        private static Type s_waitHandleDbConnectionPool = s_MicrosoftDotData.GetType("Microsoft.Data.SqlClient.ConnectionPool.WaitHandleDbConnectionPool");
         private static Type s_dbConnectionPoolGroup = s_MicrosoftDotData.GetType("Microsoft.Data.SqlClient.ConnectionPool.DbConnectionPoolGroup");
         private static Type s_dbConnectionPoolIdentity = s_MicrosoftDotData.GetType("Microsoft.Data.SqlClient.ConnectionPool.DbConnectionPoolIdentity");
         private static Type s_dbConnectionFactory = s_MicrosoftDotData.GetType("Microsoft.Data.ProviderBase.DbConnectionFactory");
@@ -23,25 +25,47 @@ namespace Microsoft.Data.SqlClient.ManualTesting.Tests.SystemDataInternals
         private static Type s_dbConnectionPoolKey = s_MicrosoftDotData.GetType("Microsoft.Data.SqlClient.ConnectionPool.DbConnectionPoolKey");
         private static Type s_dictStringPoolGroup = typeof(Dictionary<,>).MakeGenericType(s_dbConnectionPoolKey, s_dbConnectionPoolGroup);
         private static Type s_dictPoolIdentityPool = typeof(ConcurrentDictionary<,>).MakeGenericType(s_dbConnectionPoolIdentity, s_dbConnectionPool);
-        private static PropertyInfo s_dbConnectionPoolCount = s_waitHandleDbConnectionPool.GetProperty("Count", BindingFlags.Instance | BindingFlags.Public);
         private static PropertyInfo s_dictStringPoolGroupGetKeys = s_dictStringPoolGroup.GetProperty("Keys");
         private static PropertyInfo s_dictPoolIdentityPoolValues = s_dictPoolIdentityPool.GetProperty("Values");
         private static FieldInfo s_dbConnectionFactoryPoolGroupList = s_dbConnectionFactory.GetField("_connectionPoolGroups", BindingFlags.Instance | BindingFlags.NonPublic);
         private static FieldInfo s_dbConnectionPoolGroupPoolCollection = s_dbConnectionPoolGroup.GetField("_poolCollection", BindingFlags.Instance | BindingFlags.NonPublic);
         private static FieldInfo s_sqlConnectionFactorySingleton = s_sqlConnectionFactory.GetField("SingletonInstance", BindingFlags.Static | BindingFlags.Public);
-        private static FieldInfo s_dbConnectionPoolStackOld = s_waitHandleDbConnectionPool.GetField("_stackOld", BindingFlags.Instance | BindingFlags.NonPublic);
-        private static FieldInfo s_dbConnectionPoolStackNew = s_waitHandleDbConnectionPool.GetField("_stackNew", BindingFlags.Instance | BindingFlags.NonPublic);
-        private static MethodInfo s_dbConnectionPoolCleanup = s_waitHandleDbConnectionPool.GetMethod("CleanupCallback", BindingFlags.Instance | BindingFlags.NonPublic);
         private static MethodInfo s_dictStringPoolGroupTryGetValue = s_dictStringPoolGroup.GetMethod("TryGetValue");
+        #endregion
+
+        #region WaitHandleDbConnectionPool
+        private static Type s_waitHandleDbConnectionPool = s_MicrosoftDotData.GetType("Microsoft.Data.SqlClient.ConnectionPool.WaitHandleDbConnectionPool");
+        private static PropertyInfo s_waitHandleDbConnectionPoolCount = s_waitHandleDbConnectionPool.GetProperty("Count", BindingFlags.Instance | BindingFlags.Public);
+        private static PropertyInfo s_waitHandleDbConnectionPoolIdleCount = s_waitHandleDbConnectionPool.GetProperty("IdleCount", BindingFlags.Instance | BindingFlags.Public);
+        private static MethodInfo s_waitHandleDbConnectionPoolPruneIdle = s_waitHandleDbConnectionPool.GetMethod("PruneIdle", BindingFlags.Instance | BindingFlags.Public);
+        #endregion
+
+        #region ChannelDbConnectionPool
+        private static Type s_channelDbConnectionPool = s_MicrosoftDotData.GetType("Microsoft.Data.SqlClient.ConnectionPool.WaitHandleDbConnectionPool");
+        private static PropertyInfo s_channelDbConnectionPoolCount = s_channelDbConnectionPool.GetProperty("Count", BindingFlags.Instance | BindingFlags.Public);
+        private static PropertyInfo s_channelDbConnectionPoolIdleCount = s_channelDbConnectionPool.GetProperty("IdleCount", BindingFlags.Instance | BindingFlags.Public);
+        private static MethodInfo s_channelDbConnectionPoolPruneIdle = s_channelDbConnectionPool.GetMethod("PruneIdle", BindingFlags.Instance | BindingFlags.Public);
+        #endregion
+
+        private static bool ConnectionPoolV2Enabled()
+        {
+            Type switchesType = typeof(SqlCommand).Assembly.GetType("Microsoft.Data.SqlClient.LocalAppContextSwitches");
+            PropertyInfo switchField = switchesType.GetProperty("UseConnectionPoolV2", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            return (bool)switchField.GetValue(null);
+        }
 
         public static int CountFreeConnections(object pool)
         {
             VerifyObjectIsPool(pool);
 
-            ICollection oldStack = (ICollection)s_dbConnectionPoolStackOld.GetValue(pool);
-            ICollection newStack = (ICollection)s_dbConnectionPoolStackNew.GetValue(pool);
-
-            return (oldStack.Count + newStack.Count);
+            if (ConnectionPoolV2Enabled())
+            {
+                return (int)s_channelDbConnectionPoolIdleCount.GetValue(pool, null);
+            }
+            else
+            { 
+                return (int)s_waitHandleDbConnectionPoolIdleCount.GetValue(pool, null);
+            }
         }
 
         /// <summary>
@@ -110,7 +134,13 @@ namespace Microsoft.Data.SqlClient.ManualTesting.Tests.SystemDataInternals
         internal static void CleanConnectionPool(object pool)
         {
             VerifyObjectIsPool(pool);
-            s_dbConnectionPoolCleanup.Invoke(pool, new object[] { null });
+            if (ConnectionPoolV2Enabled())
+            {
+                s_channelDbConnectionPoolPruneIdle.Invoke(pool, new object[] { null });
+            } else
+            {
+                s_waitHandleDbConnectionPoolPruneIdle.Invoke(pool, new object[] { null });
+            }
         }
 
         /// <summary>
@@ -121,7 +151,15 @@ namespace Microsoft.Data.SqlClient.ManualTesting.Tests.SystemDataInternals
         internal static int CountConnectionsInPool(object pool)
         {
             VerifyObjectIsPool(pool);
-            return (int)s_dbConnectionPoolCount.GetValue(pool, null);
+
+            if (ConnectionPoolV2Enabled())
+            {
+                return (int)s_channelDbConnectionPoolCount.GetValue(pool, null);
+            }
+            else
+            {
+                return (int)s_waitHandleDbConnectionPoolCount.GetValue(pool, null);
+            }
         }
 
         private static void VerifyObjectIsPool(object pool)

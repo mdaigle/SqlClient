@@ -491,6 +491,8 @@ namespace Microsoft.Data.SqlClient.ConnectionPool
 
         public int Count => _totalObjects;
 
+        public int IdleCount => _stackNew.Count + _stackOld.Count;
+
         public DbConnectionFactory ConnectionFactory => _connectionFactory;
 
         public bool ErrorOccurred => _errorOccurred;
@@ -514,9 +516,8 @@ namespace Microsoft.Data.SqlClient.ConnectionPool
                 if (totalObjects < MinPoolSize)
                     return true;
 
-                int freeObjects = _stackNew.Count + _stackOld.Count;
                 int waitingRequests = _waitCount;
-                bool needToReplenish = (freeObjects < waitingRequests) || ((freeObjects == waitingRequests) && (totalObjects > 1));
+                bool needToReplenish = (IdleCount < waitingRequests) || ((IdleCount == waitingRequests) && (totalObjects > 1));
 
                 return needToReplenish;
             }
@@ -548,7 +549,13 @@ namespace Microsoft.Data.SqlClient.ConnectionPool
 
         private bool UsingIntegrateSecurity => _identity != null && DbConnectionPoolIdentity.NoIdentity != _identity;
 
-        private void CleanupCallback(object state)
+        private void PruningCallback(object state)
+        {
+            PruneIdle();
+        }
+
+        /// <inheritdoc />
+        public void PruneIdle()
         {
             // Called when the cleanup-timer ticks over.
 
@@ -701,7 +708,7 @@ namespace Microsoft.Data.SqlClient.ConnectionPool
 
         private Timer CreateCleanupTimer() =>
             ADP.UnsafeCreateTimer(
-                new TimerCallback(CleanupCallback),
+                new TimerCallback(PruningCallback),
                 null,
                 _cleanupWait,
                 _cleanupWait);

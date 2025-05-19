@@ -33,6 +33,8 @@ namespace Microsoft.Data.SqlClient.ConnectionPool
 
         public DbConnectionPoolIdentity Identity => throw new NotImplementedException();
 
+        public int IdleCount => throw new NotImplementedException();
+
         public bool IsRunning => throw new NotImplementedException();
 
         public DbConnectionPoolGroup PoolGroup => throw new NotImplementedException();
@@ -46,6 +48,12 @@ namespace Microsoft.Data.SqlClient.ConnectionPool
         public bool UseLoadBalancing => throw new NotImplementedException();
 
         public void Clear()
+        {
+            throw new NotImplementedException();
+        }
+
+        /// <inheritdoc/>
+        public void PruneIdle()
         {
             throw new NotImplementedException();
         }

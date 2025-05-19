@@ -59,6 +59,11 @@ namespace Microsoft.Data.SqlClient.ConnectionPool
         DbConnectionPoolIdentity Identity { get; }
 
         /// <summary>
+        /// Gets the number of connections currently sitting idle in the pool. 
+        /// </summary>
+        int IdleCount { get; }
+
+        /// <summary>
         /// Indicates whether the connection pool is currently running.
         /// </summary>
         bool IsRunning { get; }
@@ -121,6 +126,15 @@ namespace Microsoft.Data.SqlClient.ConnectionPool
         /// <param name="obj">The internal connection to return to the pool.</param>
         /// <param name="owningObject">The connection that currently owns this internal connection. Used to verify ownership.</param>
         void ReturnInternalConnection(DbConnectionInternal obj, object owningObject);
+
+        /// <summary>
+        /// Removes idle resources from the pool to optimize performance and free up memory.
+        /// </summary>
+        /// <remarks>This method identifies and removes resources that have been inactive for a certain
+        /// period of time. It is typically used to manage resource lifecycles in scenarios where unused resources can
+        /// accumulate and impact system performance. The specific criteria for determining "idle" status depend on the
+        /// implementation.</remarks>
+        void PruneIdle();
 
         /// <summary>
         /// Puts an internal connection from a transacted pool back into the general pool.
