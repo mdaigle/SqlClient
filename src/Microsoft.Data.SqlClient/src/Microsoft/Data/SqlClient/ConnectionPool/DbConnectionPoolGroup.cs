@@ -5,6 +5,7 @@
 
 using Microsoft.Data.Common;
 using Microsoft.Data.ProviderBase;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
